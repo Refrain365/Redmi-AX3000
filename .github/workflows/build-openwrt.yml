@@ -2,11 +2,6 @@ name: Redmi AX3000 ImmortalWrt ipq50xx + rkp-ipid
 
 on:
   workflow_dispatch:
-    inputs:
-      commit:
-        description: "锁定源码commit，留空用分支头"
-        required: false
-        default: "9a11bb8"
 
 env:
   REPO_URL: https://github.com/kmiit/Redmi_AX3000_immortalwrt
@@ -31,21 +26,19 @@ jobs:
             python3 python3-pip python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig \
             texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
 
-      - name: Clone kmiit redmi_ax3000-24.10
+      - name: Clone redmi_ax3000-24.10
         run: |
-          git clone --single-branch --branch "$REPO_BRANCH" --filter=blob:none "$REPO_URL" openwrt
-          if [ -n "${{ github.event.inputs.commit }}" ]; then
-            cd openwrt
-            git fetch --depth=1 origin "${{ github.event.inputs.commit }}" || git fetch --unshallow
-            git checkout "${{ github.event.inputs.commit }}"
-            cd ..
-          fi
+          git clone --single-branch --branch "$REPO_BRANCH" "$REPO_URL" openwrt
+          cd openwrt
+          git log -1 --format='%H %s'
+          echo "已使用分支头编译"
+          cd ..
 
-      - name: Assert ipq50xx + redmi profile exist
+      - name: Assert ipq50xx + redmi profile
         run: |
           cd openwrt
           test -d target/linux/qualcommax/ipq50xx || { echo "::error::无 qualcommax/ipq50xx"; exit 1; }
-          echo "--- ipq50xx 设备定义命中 ---"
+          echo "--- ipq50xx 设备定义 ---"
           grep -rli "redmi.ax3000" target/linux/qualcommax/ipq50xx/ || true
 
       - name: Add rkp-ipid
@@ -59,7 +52,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Write minimal .config then defconfig
+      - name: Configure
         run: |
           cd openwrt
           cat > .config <<'EOF'
@@ -76,20 +69,16 @@ jobs:
           EOF
           make defconfig
 
-      - name: Verify actual resolved target/device/rkp
+      - name: Verify target
         run: |
           cd openwrt
-          echo "=== resolved TARGET/DEVICE ==="
-          grep -E '^CONFIG_TARGET_' .config
-          echo "=== rkp-ipid ==="
-          grep -E 'kmod-rkp-ipid' .config || echo "rkp-ipid 未选中"
+          grep -E '^CONFIG_TARGET_' .config || true
           grep -q '^CONFIG_TARGET_QUALCOMMAX_IPQ50XX=y' .config || {
-            echo "::error::defconfig 后不是 ipq50xx，上面 TARGET 行已打印，按实际 DEVICE 名改 yml"
+            echo "::error::defconfig 后不是 ipq50xx，检查上面 TARGET 输出"
             exit 1
           }
-          # DEVICE 名只警告不致命：不同fork符号可能带前缀/下划线差异
           grep -qE 'DEVICE_REDMI_AX3000=y|DEVICE_redmi_ax3000=y' .config || \
-            echo "::warning::DEVICE_redmi_ax3000 未严格命中，请按上面 resolved TARGET 行确认profile"
+            echo "::warning::DEVICE_redmi_ax3000 未严格命中，按实际 profile 名修改"
 
       - name: Download
         run: cd openwrt && make download -j8
@@ -99,7 +88,7 @@ jobs:
           cd openwrt
           make -j"$(nproc)" V=s 2>&1 | tee build.log || make -j1 V=s
 
-      - name: Keep only sysupgrade + sha256
+      - name: Keep only sysupgrade
         run: |
           cd openwrt/bin/targets/qualcommax/ipq50xx
           ls -lh
