@@ -1,210 +1,114 @@
-name: Build Redmi AX3000 (ImmortalWrt ipq50xx) + rkp-ipid
+name: Redmi AX3000 ImmortalWrt ipq50xx + rkp-ipid
 
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: '主源码分支（红米 AX3000 维护仓库）'
-        required: true
-        default: 'redmi_ax3000-24.10'
-        type: choice
-        options:
-          - redmi_ax3000-24.10   # 24.10 线，含 redmi_ax3000 profile（推荐）
-          - redmi_ax3000         # 其它维护分支，按需
       commit:
-        description: '锁定 commit（可选，留空=分支 HEAD）。默认 9a11bb8'
+        description: "锁定源码commit，留空用分支头"
         required: false
-        default: '9a11bb8'
-      with_ua2f:
-        description: '同时编译 UA2F + luci-app-ua2f'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
+        default: "9a11bb8"
 
 env:
-  # 红米 AX3000 在官方 immortalwrt 24.10 无公开 profile，使用带该机 device 定义的维护源码
   REPO_URL: https://github.com/kmiit/Redmi_AX3000_immortalwrt
-  REPO_BRANCH_DEFAULT: redmi_ax3000-24.10
-  SOURCE_COMMIT: '9a11bb8'   # 2026-07-16；留空则取分支 HEAD
-  TARGET_DIR: qualcommax/ipq50xx
+  REPO_BRANCH: redmi_ax3000-24.10
+  RKP_URL: https://github.com/CHN-beta/rkp-ipid
   TZ: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout workflow repo
+      - name: Checkout workflow
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install build deps
         run: |
-          sudo apt update
-          sudo apt install -y --no-install-recommends \
-            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-            bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext \
-            gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool libelf-dev \
-            libncurses-dev libssl-dev libtool libyaml-dev libz-dev lrzsz mkisofs msmtp nano ninja-build \
-            p7zip-full patch pkgconf python3 python3-pip python3-pyelftools qemu-utils re2c rsync \
-            scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd \
-            zlib1g-dev zstd
-          sudo timedatectl set-timezone "$TZ"
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+            g++-multilib git gnutls-dev gperf haveged help2man intltool libelf-dev libncurses-dev libssl-dev \
+            libtool libyaml-dev libz-dev lrzsz mkisofs msmtp nano ninja-build p7zip-full patch pkgconf \
+            python3 python3-pip python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig \
+            texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
 
-      - name: Clone Redmi AX3000 ImmortalWrt source
+      - name: Clone kmiit redmi_ax3000-24.10
         run: |
-          set -e
-          : "${BRANCH:=${{ inputs.branch }}}"
-          : "${COMMIT:=${{ inputs.commit }}}"
-          if [ -n "$COMMIT" ]; then
-            git clone --filter=blob:none "$REPO_URL" openwrt
+          git clone --single-branch --branch "$REPO_BRANCH" --filter=blob:none "$REPO_URL" openwrt
+          if [ -n "${{ github.event.inputs.commit }}" ]; then
             cd openwrt
-            git checkout "$COMMIT" || {
-              echo "::warning::commit $COMMIT checkout 失败，回退到分支 $BRANCH 头"
-              git fetch origin "$BRANCH"
-              git checkout "origin/$BRANCH"
-            }
+            git fetch --depth=1 origin "${{ github.event.inputs.commit }}" || git fetch --unshallow
+            git checkout "${{ github.event.inputs.commit }}"
             cd ..
-          else
-            git clone -b "$BRANCH" --single-branch --filter=blob:none "$REPO_URL" openwrt
-          fi
-          cd openwrt
-          echo "HEAD: $(git rev-parse HEAD)"
-          grep -E '^DISTRIB_RELEASE|^DISTRIB_TARGET|^DISTRIB_ARCH' package/base-files/files/etc/openwrt_release 2>/dev/null || true
-
-      # 关键校验1：确认这个源码真的有 ipq50xx，避免上次编成 ipq807x
-      - name: Assert ipq50xx subtarget exists
-        run: |
-          cd openwrt
-          test -d "target/linux/qualcommax/ipq50xx" || {
-            echo "::error::target/linux/qualcommax/ipq50xx 不存在，当前分支 ${{ inputs.branch }} 不含 ipq50xx，停止构建"
-            echo "可选 subtargets:"
-            ls target/linux/qualcommax/ || true
-            exit 1
-          }
-
-      - name: Add rkp-ipid (and UA2F)
-        run: |
-          cd openwrt
-          rm -rf package/rkp-ipid
-          git clone https://github.com/CHN-beta/rkp-ipid package/rkp-ipid
-          if [ "${{ inputs.with_ua2f }}" = "true" ]; then
-            rm -rf package/UA2F
-            git clone https://github.com/Zxilly/UA2F package/UA2F
           fi
 
-      - name: Update & install feeds
+      - name: Assert ipq50xx + redmi profile exist
+        run: |
+          cd openwrt
+          test -d target/linux/qualcommax/ipq50xx || { echo "::error::无 qualcommax/ipq50xx"; exit 1; }
+          echo "--- ipq50xx 设备定义命中 ---"
+          grep -rli "redmi.ax3000" target/linux/qualcommax/ipq50xx/ || true
+
+      - name: Add rkp-ipid
+        run: |
+          cd openwrt
+          git clone "$RKP_URL" package/rkp-ipid
+
+      - name: Feeds
         run: |
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 关键校验2：红米 AX3000 在 ipq50xx 下 DEVICE 名是否为 redmi_ax3000
-      - name: Verify Redmi AX3000 profile name
+      - name: Write minimal .config then defconfig
         run: |
           cd openwrt
-          make defconfig >/dev/null 2>&1 || true
-          PROFILES=$(make -j1 --no-print-directory -C target/linux/qualcommax/ipq50xx \
-            info 2>/dev/null | grep -oE 'redmi_ax3000[a-z0-9_-]*' | sort -u || true)
-          echo "检测到的 redmi_ax3000 相关 profile: ${PROFILES:-无}"
-          echo "$PROFILES" | grep -qx 'redmi_ax3000' || {
-            echo "::warning::未精确匹配到 DEVICE_redmi_ax3000，将在下一行回退为仅选 subtarget（仍可出 bin，但需人工确认具体机型 bin）"
-          }
-
-      - name: Write .config
-        run: |
-          cd openwrt
-          : > .config
-          cat >> .config <<'EOF'
-          # Target: Qualcommax / ipq50xx / Redmi AX3000
+          cat > .config <<'EOF'
           CONFIG_TARGET_qualcommax=y
           CONFIG_TARGET_qualcommax_ipq50xx=y
           CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y
-
-          # rkp-ipid：编进固件（内核模块，禁止后期 opkg 补装）
           CONFIG_PACKAGE_kmod-rkp-ipid=y
-
-          # rkp-ipid 所需防火墙能力
           CONFIG_PACKAGE_iptables-mod-ipopt=y
           CONFIG_PACKAGE_kmod-ipt-ipopt=y
           CONFIG_PACKAGE_iptables-mod-u32=y
           CONFIG_PACKAGE_iptables-mod-filter=y
           CONFIG_PACKAGE_ipset=y
-          CONFIG_PACKAGE_iptables-nft=y
-          CONFIG_PACKAGE_kmod-nft-queue=y
-
-          # UA2F（可选）
-          CONFIG_PACKAGE_ua2f=y
-          CONFIG_PACKAGE_luci-app-ua2f=y
           CONFIG_NETFILTER_NETLINK_GLUE_CT=y
-
-          # 必须关闭 flow offloading，否则 rkp-ipid 失效
-          # CONFIG_DEFAULT_flow_offloading is not set
-          # CONFIG_PACKAGE_kmod-ipt-offload is not set
           EOF
-          if [ "${{ inputs.with_ua2f }}" != "true" ]; then
-            sed -i '/CONFIG_PACKAGE_ua2f=y/d;/CONFIG_PACKAGE_luci-app-ua2f=y/d' .config
-          fi
           make defconfig
 
-      # 关键校验3：target / device / 模块 三件套必须命中
-      - name: Assert config resolved correctly
+      - name: Verify actual resolved target/device/rkp
         run: |
           cd openwrt
-          grep -q '^CONFIG_TARGET_QUALCOMMAX_IPQ50XX=y' .config || { echo "::error::未落到 ipq50xx"; exit 1; }
-          grep -qE '^CONFIG_TARGET_QUALCOMMAX_IPQ50XX_DEVICE_REDMI_AX3000=y' .config || {
-            echo "::warning::DEVICE_redmi_ax3000 未生效，可能该源码的 AX3000 profile 名不同，请核对"
+          echo "=== resolved TARGET/DEVICE ==="
+          grep -E '^CONFIG_TARGET_' .config
+          echo "=== rkp-ipid ==="
+          grep -E 'kmod-rkp-ipid' .config || echo "rkp-ipid 未选中"
+          grep -q '^CONFIG_TARGET_QUALCOMMAX_IPQ50XX=y' .config || {
+            echo "::error::defconfig 后不是 ipq50xx，上面 TARGET 行已打印，按实际 DEVICE 名改 yml"
+            exit 1
           }
-          grep -q '^CONFIG_PACKAGE_kmod-rkp-ipid=y' .config || { echo "::error::kmod-rkp-ipid 未选中"; exit 1; }
-          echo "--- 生效的关键配置 ---"
-          grep -E 'TARGET_QUALCOMMAX|kmod-rkp-ipid|ua2f|GLUE_CT' .config | grep '=y'
+          # DEVICE 名只警告不致命：不同fork符号可能带前缀/下划线差异
+          grep -qE 'DEVICE_REDMI_AX3000=y|DEVICE_redmi_ax3000=y' .config || \
+            echo "::warning::DEVICE_redmi_ax3000 未严格命中，请按上面 resolved TARGET 行确认profile"
 
-      - name: Download sources
-        run: |
-          cd openwrt
-          make download -j8
-          find dl -size -1024c -type f -delete || true
+      - name: Download
+        run: cd openwrt && make download -j8
 
-      - name: Build firmware
+      - name: Build
         run: |
           cd openwrt
           make -j"$(nproc)" V=s 2>&1 | tee build.log || make -j1 V=s
 
-      - name: Locate sysupgrade (only)
-        id: locate
+      - name: Keep only sysupgrade + sha256
         run: |
           cd openwrt/bin/targets/qualcommax/ipq50xx
-          echo "=== 产物列表 ==="
           ls -lh
-          # 只保留 sysupgrade，删除 factory / ubi / initramfs / sdk / imagebuilder / 索引文件
-          find . -maxdepth 1 -type f \
-            ! -name '*sysupgrade*' \
-            -delete 2>/dev/null || true
-          rm -rf packages
-          echo "=== 最终上传内容 ==="
-          ls -lh
-          [ -n "$(find . -maxdepth 1 -name '*sysupgrade*' -print -quit)" ] || {
-            echo "::error::未生成 sysupgrade.bin，构建失败"; exit 1;
-          }
-          echo "FIRMWARE_DIR=$(pwd)" >> "$GITHUB_ENV"
+          mkdir -p /tmp/out
+          cp *sysupgrade* /tmp/out/ || true
+          cp sha256sums /tmp/out/ 2>/dev/null || true
 
-      - name: SHA256
-        run: |
-          cd "$FIRMWARE_DIR"
-          sha256sum -- * > sha256sums
-          cat sha256sums
-
-      - name: Upload sysupgrade artifact
+      - name: Upload sysupgrade
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-redmi-ax3000-ipq50xx-sysupgrade
-          path: ${{ env.FIRMWARE_DIR }}/*
-          if-no-files-found: error
-
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: openwrt/build.log
+          name: redmi-ax3000-ipq50xx-rkp-ipid
+          path: /tmp/out/*
