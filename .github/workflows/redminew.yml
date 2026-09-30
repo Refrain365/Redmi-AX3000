@@ -1,4 +1,4 @@
-name: Redmi AX3000 ipq50xx ImmortalWrt + rkp-ipid (sysupgrade+ubi)
+name: 2.Redmi AX3000 ipq50xx ImmortalWrt + rkp-ipid (sysupgrade+ubi)
 
 on:
   workflow_dispatch:
