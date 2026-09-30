@@ -1,4 +1,4 @@
-name: Redmi AX3000 ImmortalWrt ipq50xx + rkp-ipid
+name: 1.Redmi AX3000 ImmortalWrt ipq50xx + rkp-ipid
 
 on:
   workflow_dispatch:
