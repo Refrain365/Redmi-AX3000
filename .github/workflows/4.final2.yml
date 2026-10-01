@@ -2,15 +2,6 @@ name: 4.final2:Redmi AX3000 ubi only | rkp-ipid + UA3F + Argon + ShellCrash | 16
 
 on:
   workflow_dispatch:
-    inputs:
-      rkp_commit:
-        description: "rkp-ipid 锁定commit，留空用默认分支头"
-        required: false
-        default: ""
-      ua3f_ref:
-        description: "UA3F 分支/commit，留空用默认分支头"
-        required: false
-        default: ""
 
 env:
   REPO_URL: https://github.com/kmiit/Redmi_AX3000_immortalwrt
