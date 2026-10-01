@@ -1,4 +1,4 @@
-name: 3.final:Redmi AX3000 ubi only | rkp-ipid + UA3F + Argon + ShellCrash | 160MHz | nft-queue+tproxy+curl
+name: 4.final2:Redmi AX3000 ubi only | rkp-ipid + UA3F + Argon + ShellCrash | 160MHz | nft-queue+tproxy+curl
 
 on:
   workflow_dispatch:
