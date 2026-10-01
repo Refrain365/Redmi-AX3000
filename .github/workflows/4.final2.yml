@@ -1,4 +1,4 @@
-name: Redmi AX3000 ubi-only | rkp-ipid + UA3F + Argon + ShellCrash + nft-queue/tproxy + zram 32MB
+name: 4.final2:Redmi AX3000 ubi-only | rkp-ipid + UA3F + Argon + ShellCrash + nft-queue/tproxy + zram 32MB
 
 on:
   workflow_dispatch:
