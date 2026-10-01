@@ -1,11 +1,4 @@
-name: 4.final2:Redmi AX3000 ubi | rkp-ipid + UA3F + Argon + ShellCrash + nft-queue/tproxy + 32MB swap
-
-# 目标：红米 AX3000 (qualcommax/ipq50xx)，ImmortalWrt 24.10-SNAPSHOT
-# 产物：仅 factory.ubi（NAND 双槽首次刷入用；已跑同源系统请用 sysupgrade，本流程不产出）
-# 内核模块：rkp-ipid、kmod-nft-queue、kmod-nft-tproxy、kmod-nfnetlink-queue（随内核编译）
-# 用户态：ua3f、curl、zram-swap(32MB)
-# 主题：luci-theme-argon + argon-config
-# 首次启动：ShellCrash 离线缓存安装、5G 160MHz 预置、rkp 模块参数、关 flow offloading
+name: Redmi AX3000 ubi-only | rkp-ipid + UA3F + Argon + ShellCrash + nft-queue/tproxy + zram 32MB
 
 on:
   workflow_dispatch:
@@ -26,7 +19,8 @@ env:
   UA3F_URL: https://github.com/SunBK201/UA3F
   ARGON_URL: https://github.com/jerrykuku/luci-theme-argon.git
   ARGONCFG_URL: https://github.com/jerrykuku/luci-app-argon-config.git
-  SHELLCRASH_URL: https://fastly.jsdelivr.net/gh/juewuy/ShellCrash@master
+  SHELLCRASH_INSTALL_URL: https://fastly.jsdelivr.net/gh/juewuy/ShellCrash@master/install.sh
+  SHELLCRASH_TARBALL_URL: https://codeload.github.com/juewuy/ShellCrash/tarball/refs/heads/master
   TZ: Asia/Shanghai
 
 jobs:
@@ -36,7 +30,7 @@ jobs:
       - name: Checkout workflow
         uses: actions/checkout@v4
 
-      - name: Install build deps
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
@@ -51,7 +45,6 @@ jobs:
           git clone --single-branch --branch "$REPO_BRANCH" --filter=blob:none "$REPO_URL" openwrt
           cd openwrt && git log -1 --format='%H %s' && cd ..
 
-      # rkp-ipid：不带主仓分支
       - name: Add rkp-ipid
         run: |
           cd openwrt
@@ -60,26 +53,35 @@ jobs:
           if [ -n "${{ github.event.inputs.rkp_commit }}" ]; then
             cd package/rkp-ipid
             git fetch --depth=1 origin "${{ github.event.inputs.rkp_commit }}" && git checkout "${{ github.event.inputs.rkp_commit }}" \
-              || echo "::warning::rkp commit 取不到，回退默认头"
+              || echo "::warning::rkp commit 取不到，回退默认分支头"
             cd ../..
           fi
-          test -f package/rkp-ipid/Makefile || { echo "::error::rkp-ipid 无Makefile"; exit 1; }
+          test -f package/rkp-ipid/Makefile || { echo "::error::rkp-ipid 无 Makefile"; exit 1; }
 
-      # UA3F：源码编 ipk（24.10 用 ipk；apk 用于 25.12+）
-      - name: Add UA3F from source
+      - name: Add UA3F from source with auto Makefile detection
         run: |
           cd openwrt
-          rm -rf package/UA3F
-          git clone "$UA3F_URL" package/UA3F
+          rm -rf package/UA3F package/UA3F-tmp
+          git clone "$UA3F_URL" package/UA3F-tmp
           if [ -n "${{ github.event.inputs.ua3f_ref }}" ]; then
-            cd package/UA3F
+            cd package/UA3F-tmp
             git fetch --depth=1 origin "${{ github.event.inputs.ua3f_ref }}" && git checkout "${{ github.event.inputs.ua3f_ref }}" \
-              || echo "::warning::ua3f ref 取不到，回退默认头"
+              || echo "::warning::ua3f ref 取不到，用默认分支头"
             cd ../..
           fi
-          ls package/UA3F/Makefile >/dev/null 2>&1 || echo "::warning::UA3F无Makefile，确认仓库结构"
+          MK=$(find package/UA3F-tmp -maxdepth 3 -type f -name Makefile | while read f; do
+            grep -lqE '^define Package/ua3f|^Build/Compile|^include \$\$\(TOPDIR\)/rules.mk' "$f" && echo "$f" && break
+          done | head -n1)
+          if [ -z "$MK" ]; then
+            echo "::error::UA3F 仓库中未找到 OpenWrt Makefile，打印目录结构："
+            find package/UA3F-tmp -maxdepth 3 | head -50
+            exit 1
+          fi
+          MK_DIR=$(dirname "$MK")
+          mv "$MK_DIR" package/UA3F
+          rm -rf package/UA3F-tmp || true
+          echo "UA3F Makefile 位置：$(find package/UA3F -maxdepth 2 -name Makefile)"
 
-      # Argon 主题
       - name: Add Argon theme
         run: |
           cd openwrt
@@ -87,42 +89,88 @@ jobs:
           git clone "$ARGON_URL" package/luci-theme-argon
           git clone "$ARGONCFG_URL" package/luci-app-argon-config
 
-      # ShellCrash 离线缓存（脚本本体可离线，内核二进制仍需首次有网）
-      - name: Cache ShellCrash offline
+      - name: Cache ShellCrash offline into files
         run: |
           cd openwrt
-          rm -rf files
-          mkdir -p files/root/shellcrash-offline
-          curl -kfsSL "$SHELLCRASH_URL/install.sh" -o files/root/shellcrash-offline/install.sh || echo "::warning::install.sh下载失败"
-          chmod +x files/root/shellcrash-offline/install.sh
-          curl -kfsSL "https://fastly.jsdelivr.net/gh/juewuy/ShellCrash@master.tar.gz" -o files/root/shellcrash-offline/ShellCrash.tar.gz || echo "::warning::tarball下载失败"
-          mkdir -p files/etc/uci-defaults
+          mkdir -p files/root/shellcrash-offline files/etc/uci-defaults
+
+          # install.sh 多源下载
+          install_ok=0
+          for u in \
+            "https://fastly.jsdelivr.net/gh/juewuy/ShellCrash@master/install.sh" \
+            "https://testingcf.jsdelivr.net/gh/juewuy/ShellCrash@master/install.sh" \
+            "https://raw.githubusercontent.com/juewuy/ShellCrash/master/install.sh"; do
+            if curl -kfsSL "$u" -o files/root/shellcrash-offline/install.sh; then
+              echo "install.sh ok from $u"
+              install_ok=1
+              break
+            fi
+          done
+          [ "$install_ok" = "1" ] && chmod +x files/root/shellcrash-offline/install.sh
+
+          # tarball 多源下载
+          tarball_ok=0
+          for u in \
+            "https://codeload.github.com/juewuy/ShellCrash/tarball/refs/heads/master" \
+            "https://fastly.jsdelivr.net/gh/juewuy/ShellCrash@master.tar.gz" \
+            "https://testingcf.jsdelivr.net/gh/juewuy/ShellCrash@master.tar.gz"; do
+            if curl -kfsSL "$u" -o files/root/shellcrash-offline/ShellCrash.tar.gz; then
+              echo "tarball ok from $u"
+              tarball_ok=1
+              break
+            fi
+          done
+          if [ "$tarball_ok" != "1" ]; then
+            echo "::warning::tarball 下载失败，改用 shallow clone"
+            rm -rf /tmp/sc-clone && mkdir -p /tmp/sc-clone
+            git clone --depth=1 --branch master https://github.com/juewuy/ShellCrash.git /tmp/sc-clone/ShellCrash
+            tar -czf files/root/shellcrash-offline/ShellCrash.tar.gz -C /tmp/sc-clone ShellCrash
+          fi
+
+          # 首次启动自动尝试安装 ShellCrash
           cat > files/etc/uci-defaults/99-shellcrash-firstboot <<'EOT'
           #!/bin/sh
-          CRASH_DIR=/root/shellcrash-offline
+          OFF=/root/shellcrash-offline
           export url='https://fastly.jsdelivr.net/gh/juewuy/ShellCrash@master'
-          if command -v curl >/dev/null 2>&1 && curl -kfsSL "$url/install.sh" -o /tmp/sc_install.sh 2>/dev/null; then
-            sh -c "$(curl -kfsSL $url/install.sh)" && source /etc/profile >/dev/null 2>&1
-          elif [ -x "$CRASH_DIR/install.sh" ]; then
-            sh "$CRASH_DIR/install.sh" && source /etc/profile >/dev/null 2>&1
-          elif [ -f "$CRASH_DIR/ShellCrash.tar.gz" ]; then
-            mkdir -p /tmp/sc_src && tar -xzf "$CRASH_DIR/ShellCrash.tar.gz" -C /tmp/sc_src
-            find /tmp/sc_src -maxdepth 3 -name install.sh -exec sh {} \; && source /etc/profile >/dev/null 2>&1
+
+          # 有网优先用官方安装器
+          if curl -kfsS --max-time 10 "$url/install.sh" -o /tmp/sc_install.sh 2>/dev/null; then
+            nohup sh -c "$(curl -kfsSL $url/install.sh)" >/tmp/sc_install.log 2>&1 &
+            sleep 2
+            exit 0
+          fi
+
+          # 无网：本地 install.sh 或 tarball
+          if [ -x "$OFF/install.sh" ]; then
+            export url="file://$OFF"
+            if [ -f "$OFF/ShellCrash.tar.gz" ]; then
+              mkdir -p /tmp/sc-off && tar -xzf "$OFF/ShellCrash.tar.gz" -C /tmp/sc-off
+              SCROOT=$(find /tmp/sc-off -maxdepth 2 -name install.sh -exec dirname {} \; | head -n1)
+              if [ -n "$SCROOT" ]; then
+                nohup sh "$SCROOT/install.sh" >/tmp/sc_install.log 2>&1 &
+                sleep 2
+                exit 0
+              fi
+            fi
+            nohup sh "$OFF/install.sh" >/tmp/sc_install.log 2>&1 &
+            sleep 2
           fi
           exit 0
           EOT
           chmod +x files/etc/uci-defaults/99-shellcrash-firstboot
 
-      # 首次启动：5G 160MHz、rkp参数、关offloading、32MB zram swap
-      - name: Preset uci defaults
+      - name: Preset uci defaults for 160MHz and 32MB zram swap
         run: |
           cd openwrt
           mkdir -p files/etc/uci-defaults
           cat > files/etc/uci-defaults/98-ax3000-tweak <<'EOT'
           #!/bin/sh
-          # 5G 160MHz：CN + HE160 + DFS信道(64/100/120)；DFS需等雷达检测约60s
-          for r in $(uci show wireless 2>/dev/null | sed -n 's/.*\.\(radio[0-9]\)\..*/\1/p' | sort -u); do
-            if uci -q get wireless.$r.htmode | grep -qiE 'HE|VHT'; then
+
+          # 5G 160MHz 预设：国家码 CN，HE160，信道 64（DFS）
+          # 如果硬件/区域不支持 160，启动后可改为 HE80
+          for r in $(uci show wireless 2>/dev/null | sed -n 's/.*\(radio[0-9]\).*/\1/p' | sort -u); do
+            hwmode=$(uci -q get wireless.$r.hwmode)
+            if [ "$hwmode" = "11a" ]; then
               uci -q set wireless.$r.country='CN'
               uci -q set wireless.$r.htmode='HE160'
               uci -q set wireless.$r.channel='64'
@@ -131,31 +179,31 @@ jobs:
           done
           uci commit wireless
 
-          # rkp-ipid（参数名以 modinfo rkp-ipid 为准；仓库示例为 mark_ramdom）
-          mkdir -p /etc/modules.d
-          cat > /etc/modules.d/99-rkp-ipid <<'MOD'
-          rkp-ipid mark_capture=0x10 mark_ramdom=0x20
-          MOD
-          modprobe rkp-ipid 2>/dev/null || true
+          # 32MB zram swap
+          if [ -f /etc/init.d/zram ]; then
+            if ! uci -q get system.@zram[0] >/dev/null 2>&1; then
+              uci add system zram >/dev/null
+            fi
+            uci set system.@zram[0].enabled='1'
+            uci set system.@zram[0].size='32'
+            uci commit system
+            /etc/init.d/zram restart >/dev/null 2>&1 || true
+          fi
 
-          # 关 flow offloading，rkp 才生效
+          # 关闭 flow offloading，保证 rkp-ipid 生效
           uci -q set firewall.@defaults[0].flow_offloading='0'
           uci -q set firewall.@defaults[0].flow_offloading_hw='0'
           uci commit firewall
 
-          # 32MB zram swap（压缩内存交换，适合小内存路由器；非磁盘swap）
-          if [ -x /sbin/zram_swap ]; then
-            uci -q set system.@zram[0].enabled='1'
-            uci -q set system.@zram[0].size='32'
-            uci commit system
-            /etc/init.d/zram-swap enable 2>/dev/null
-            /etc/init.d/zram-swap start 2>/dev/null
-          fi
+          # rkp-ipid 模块参数
+          mkdir -p /etc/modules.d
+          echo "rkp-ipid mark_capture=0x10 mark_ramdom=0x20" > /etc/modules.d/99-rkp-ipid
+
           exit 0
           EOT
           chmod +x files/etc/uci-defaults/98-ax3000-tweak
 
-      - name: Assert ipq50xx source
+      - name: Assert ipq50xx source tree
         run: |
           cd openwrt
           test -d target/linux/qualcommax/ipq50xx || { echo "::error::无 qualcommax/ipq50xx"; exit 1; }
@@ -176,100 +224,80 @@ jobs:
           CONFIG_TARGET_qualcommax_ipq50xx=y
           CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y
 
-          # rkp-ipid（内核模块，随内核编）
+          # rkp-ipid
           CONFIG_PACKAGE_kmod-rkp-ipid=y
 
-          # nftables 队列 / tproxy（透明代理 UA3F 的 nft 模式）
+          # UA3F + nft 依赖
+          CONFIG_PACKAGE_ua3f=y
+          CONFIG_PACKAGE_luci-app-ua3f=y
           CONFIG_PACKAGE_kmod-nft-queue=y
           CONFIG_PACKAGE_kmod-nfnetlink-queue=y
           CONFIG_PACKAGE_kmod-nft-tproxy=y
           CONFIG_PACKAGE_kmod-nft-socket=y
           CONFIG_PACKAGE_kmod-nf-tproxy=y
           CONFIG_PACKAGE_kmod-ipt-tproxy=y
-          CONFIG_NETFILTER_NETLINK_GLUE_CT=y
 
-          # UA3F（用户态）
-          CONFIG_PACKAGE_ua3f=y
-
-          # curl
+          # 基础依赖
           CONFIG_PACKAGE_curl=y
           CONFIG_PACKAGE_libcurl=y
           CONFIG_PACKAGE_ca-bundle=y
+          CONFIG_PACKAGE_iptables-mod-ipopt=y
+          CONFIG_PACKAGE_kmod-ipt-ipopt=y
+          CONFIG_PACKAGE_ipset=y
 
-          # 32MB zram swap
-          CONFIG_PACKAGE_zram-swap=y
-          CONFIG_PACKAGE_kmod-zram=y
-          CONFIG_PACKAGE_libudev-zero=y
-
-          # Argon
+          # Argon 主题
           CONFIG_PACKAGE_luci-theme-argon=y
           CONFIG_PACKAGE_luci-app-argon-config=y
 
-          # 基础
-          CONFIG_PACKAGE_iptables-mod-ipopt=y
-          CONFIG_PACKAGE_kmod-ipt-ipopt=y
-          CONFIG_PACKAGE_iptables-mod-u32=y
-          CONFIG_PACKAGE_iptables-mod-filter=y
-          CONFIG_PACKAGE_ipset=y
+          # 32MB zram swap
+          CONFIG_PACKAGE_zram-swap=y
+
+          # 基础 LuCI 中文
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
-          CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
           EOF
           make defconfig
 
-      - name: Verify target + packages
+      - name: Verify target and packages
         run: |
           cd openwrt
           echo "=== TARGET ==="
           grep -E '^CONFIG_TARGET_' .config
-          grep -qx 'CONFIG_TARGET_qualcommax_ipq50xx=y' .config || { echo "::error::未落ipq50xx"; exit 1; }
-          for p in kmod-rkp-ipid kmod-nft-queue kmod-nft-tproxy kmod-nfnetlink-queue kmod-nf-tproxy \
-                   ua3f curl ca-bundle zram-swap kmod-zram luci-theme-argon; do
-            grep -qx "CONFIG_PACKAGE_$p=y" .config || echo "::warning::$p 未选中，检查package/feeds"
+          grep -qx 'CONFIG_TARGET_qualcommax_ipq50xx=y' .config || { echo "::error::未落到 ipq50xx"; exit 1; }
+
+          for p in kmod-rkp-ipid ua3f luci-theme-argon zram-swap kmod-nft-queue kmod-nft-tproxy curl; do
+            if ! grep -qx "CONFIG_PACKAGE_$p=y" .config; then
+              echo "::warning::$p 未选中，请检查对应 package/feeds"
+            fi
           done
+
           if ! grep -qiE 'DEVICE_REDMI_AX3000=y' .config; then
-            echo "::warning::DEVICE名不匹配，列出profile："
+            echo "::warning::DEVICE 名称不匹配，实际 ipq50xx profile："
             make --silent dump-target-info 2>/dev/null | grep -i ax3000 || true
           fi
-
-      - name: Confirm factory ubi image rule
-        run: |
-          cd openwrt
-          if ! grep -rq "factory.ubi\|\.ubi\b" target/linux/qualcommax/image/*.mk 2>/dev/null; then
-            echo "::warning::ipq50xx image makefile未明显含factory.ubi规则，可能只出sysupgrade"
-          fi
-
-      - name: Download
-        run: cd openwrt && make download -j8
 
       - name: Build
         run: |
           cd openwrt
           make -j"$(nproc)" V=s 2>&1 | tee build.log || make -j1 V=s
 
-      - name: Collect factory ubi only
+      - name: Collect factory.ubi only
         run: |
           cd openwrt/bin/targets/qualcommax/ipq50xx
+          echo "=== 产物列表 ==="
           ls -lh
           mkdir -p /tmp/ubi
           cp *factory*.ubi* /tmp/ubi/ || true
           cp sha256sums /tmp/ubi/ 2>/dev/null || true
           if [ -z "$(ls -A /tmp/ubi 2>/dev/null | grep -v sha256sums)" ]; then
-            echo "::error::未生成任何factory.ubi"
-            ls -lh
+            echo "::error::未生成 factory.ubi，无法上传。若只需要 sysupgrade 请修改收集规则。"
             exit 1
           fi
-          echo "--- ubi产物 ---"; ls -l /tmp/ubi
+          echo "=== 最终上传内容 ==="
+          ls -l /tmp/ubi
 
       - name: Upload factory ubi
         uses: actions/upload-artifact@v4
         with:
           name: redmi-ax3000-factory-ubi
           path: /tmp/ubi/*
-
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: openwrt/build.log
