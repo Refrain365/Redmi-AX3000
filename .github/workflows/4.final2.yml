@@ -1,4 +1,4 @@
-name: Redmi AX3000 ubi | rkp-ipid + UA3F + Argon + ShellCrash + nft-queue/tproxy + 32MB swap
+name: 4.final2:Redmi AX3000 ubi | rkp-ipid + UA3F + Argon + ShellCrash + nft-queue/tproxy + 32MB swap
 
 # 目标：红米 AX3000 (qualcommax/ipq50xx)，ImmortalWrt 24.10-SNAPSHOT
 # 产物：仅 factory.ubi（NAND 双槽首次刷入用；已跑同源系统请用 sysupgrade，本流程不产出）
