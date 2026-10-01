@@ -94,7 +94,6 @@ jobs:
           cd openwrt
           mkdir -p files/root/shellcrash-offline files/etc/uci-defaults
 
-          # install.sh 多源下载
           install_ok=0
           for u in \
             "https://fastly.jsdelivr.net/gh/juewuy/ShellCrash@master/install.sh" \
@@ -108,7 +107,6 @@ jobs:
           done
           [ "$install_ok" = "1" ] && chmod +x files/root/shellcrash-offline/install.sh
 
-          # tarball 多源下载
           tarball_ok=0
           for u in \
             "https://codeload.github.com/juewuy/ShellCrash/tarball/refs/heads/master" \
@@ -132,14 +130,12 @@ jobs:
           OFF=/root/shellcrash-offline
           export url='https://fastly.jsdelivr.net/gh/juewuy/ShellCrash@master'
 
-          # 有网优先用官方安装器
           if curl -kfsS --max-time 10 "$url/install.sh" -o /tmp/sc_install.sh 2>/dev/null; then
             nohup sh -c "$(curl -kfsSL $url/install.sh)" >/tmp/sc_install.log 2>&1 &
             sleep 2
             exit 0
           fi
 
-          # 无网：本地 install.sh 或 tarball
           if [ -x "$OFF/install.sh" ]; then
             export url="file://$OFF"
             if [ -f "$OFF/ShellCrash.tar.gz" ]; then
@@ -165,8 +161,6 @@ jobs:
           cat > files/etc/uci-defaults/98-ax3000-tweak <<'EOT'
           #!/bin/sh
 
-          # 5G 160MHz 预设：国家码 CN，HE160，信道 64（DFS）
-          # 如果硬件/区域不支持，可改为 HE80
           for r in $(uci show wireless 2>/dev/null | sed -n 's/.*\(radio[0-9]\).*/\1/p' | sort -u); do
             hwmode=$(uci -q get wireless.$r.hwmode)
             if [ "$hwmode" = "11a" ]; then
@@ -178,7 +172,6 @@ jobs:
           done
           uci commit wireless
 
-          # 32MB zram swap
           if [ -f /etc/init.d/zram ]; then
             if ! uci -q get system.@zram[0] >/dev/null 2>&1; then
               uci add system zram >/dev/null
@@ -189,12 +182,10 @@ jobs:
             /etc/init.d/zram restart >/dev/null 2>&1 || true
           fi
 
-          # 关闭 flow offloading，保证 rkp-ipid 生效
           uci -q set firewall.@defaults[0].flow_offloading='0'
           uci -q set firewall.@defaults[0].flow_offloading_hw='0'
           uci commit firewall
 
-          # rkp-ipid 模块参数
           mkdir -p /etc/modules.d
           echo "rkp-ipid mark_capture=0x10 mark_ramdom=0x20" > /etc/modules.d/99-rkp-ipid
 
@@ -277,24 +268,38 @@ jobs:
             make --silent dump-target-info 2>/dev/null | grep -i ax3000 || true
           fi
 
-      - name: Download
-        run: cd openwrt && make download -j8
-
-      - name: Build (with single-thread fallback)
+      - name: Download all sources
         run: |
           cd openwrt
-          make -j"$(nproc)" V=s 2>&1 | tee build.log
+          make download -j8 || make download -j1
+          echo "download done"
+
+      - name: Build (j2 primary, j1 clean retry)
+        run: |
+          cd openwrt
+          echo "===== BUILD_START $(date) ====="
+          # 固定 -j2，避免 GitHub runner 内存不足
+          make -j2 V=s 2>&1 | tee build.log
           rc=${PIPESTATUS[0]}
-          if [ $rc -ne 0 ]; then
-            echo "::error::并行编译失败，降为单线程重试"
+          if [ $rc -eq 0 ]; then
+            echo "===== BUILD_SUCCESS j2 ====="
+          else
+            echo "===== BUILD_FAILED j2 ===== 清理后单线程重试 $(date)"
+            make clean >/dev/null 2>&1 || true
             make -j1 V=s 2>&1 | tee build_single.log
-            exit ${PIPESTATUS[0]}
+            rc=${PIPESTATUS[0]}
+            if [ $rc -eq 0 ]; then
+              echo "===== BUILD_SUCCESS j1 ====="
+            else
+              echo "===== BUILD_FAILED j1 ===== 详见 build_single.log ====="
+            fi
           fi
+          exit $rc
 
       - name: Collect images and logs
         if: always()
         run: |
-          cd openwrt/bin/targets/qualcommax/ipq50xx || { echo "没有 bin 输出目录"; exit 1; }
+          cd openwrt/bin/targets/qualcommax/ipq50xx 2>/dev/null || { echo "没有 bin 输出目录"; exit 1; }
           mkdir -p /tmp/out
           echo "=== 当前产物列表 ==="
           ls -lh
@@ -306,7 +311,7 @@ jobs:
           if ls /tmp/out/*factory*.ubi* >/dev/null 2>&1; then
             echo "::notice::已生成 factory.ubi"
           else
-            echo "::warning::没有生成 factory.ubi，当前只有以下内容："
+            echo "::warning::没有生成 factory.ubi，当前内容："
             ls -lh /tmp/out
           fi
 
