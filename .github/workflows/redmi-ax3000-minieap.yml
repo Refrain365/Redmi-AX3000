@@ -1,0 +1,403 @@
+name: 4.final2:Redmi AX3000 ubi only | rkp-ipid + UA3F + Argon + ShellCrash + MiniEAP(锐捷认证)
+"on":
+  workflow_dispatch:
+    inputs:
+      rkp_commit:
+        description: 'rkp-ipid 固定 commit（留空=仓库默认头）'
+        required: false
+        type: string
+      ua3f_ref:
+        description: 'UA3F 固定 ref/commit（留空=仓库默认头）'
+        required: false
+        type: string
+      minieap_ref:
+        description: 'minieap 固定 ref/commit（留空=升级后的 0.93 默认头）'
+        required: false
+        type: string
+      minieap_ui:
+        description: '图形界面方案'
+        required: true
+        default: 'luci-proto'
+        type: choice
+        options:
+          - 'luci-proto'
+          - 'luci-app'
+
+env:
+  REPO_URL: https://github.com/kmiit/Redmi_AX3000_immortalwrt
+  REPO_BRANCH: redmi_ax3000-24.10
+  RKP_URL: https://github.com/CHN-beta/rkp-ipid
+  UA3F_URL: https://github.com/SunBK201/UA3F
+  ARGON_URL: https://github.com/jerrykuku/luci-theme-argon.git
+  ARGONCFG_URL: https://github.com/jerrykuku/luci-app-argon-config.git
+  SHELLCRASH_URL: https://fastly.jsdelivr.net/gh/juewuy/ShellCrash@master
+  MINIEAP_URL: https://github.com/KumaTea/openwrt-minieap
+  MINIEAP_PROTO_URL: https://github.com/ysc3839/luci-proto-minieap
+  MINIEAP_APP_URL: https://github.com/BoringCat/luci-app-minieap
+  TZ: Asia/Shanghai
+  CCACHE_DIR: ${{ github.workspace }}/openwrt/ccache
+  DL_DIR: ${{ github.workspace }}/openwrt/dl
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout workflow
+        uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+            g++-multilib git gnutls-dev gperf haveged help2man intltool libelf-dev libncurses-dev libssl-dev \
+            libtool libyaml-dev libz-dev lrzsz mkisofs msmtp nano ninja-build p7zip-full patch pkgconf \
+            python3 python3-pip python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig \
+            texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd golang-go gettext
+
+      # ---- 加速：恢复 ccache ----
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-ax3000-2410-ccache-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-ax3000-2410-ccache-
+
+      # ---- 加速：恢复 dl 下载目录 ----
+      - name: Cache dl
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DL_DIR }}
+          key: ${{ runner.os }}-ax3000-2410-dl-${{ hashFiles('**/feeds.conf*') }}
+          restore-keys: |
+            ${{ runner.os }}-ax3000-2410-dl-
+
+      - name: Clone kmiit redmi_ax3000-24.10
+        run: |
+          git clone --single-branch --branch "$REPO_BRANCH" --filter=blob:none "$REPO_URL" openwrt
+          cd openwrt && git log -1 --format='%H %s' && cd ..
+
+      # ==================== MiniEAP（锐捷认证客户端）====================
+      # 说明：KumaTea/openwrt-minieap 已于 2025-04-13 归档且源码快照停留在 2018 年（0.92.1），
+      # 直接套用会在 ImmortalWrt 24.10（kernel 6.x）上因缺少 libpcap/libnl-tiny 依赖而编译失败。
+      # 因此这里沿用其 Makefile 结构，仅把 PKG_SOURCE 升级到 updateing/minieap 的 0.93 稳定版，
+      # 并补齐依赖声明。若你的学校需要特定魔改（如 SYSU 心跳、GZHU 字段），请把 MINIEAP_URL
+      # 换成对应 fork 并在下方 sed 里保留该校的 patches/ 目录。
+      - name: Add MiniEAP (Ruijie 802.1x client)
+        run: |
+          cd openwrt
+          rm -rf package/minieap
+          git clone "$MINIEAP_URL" package/minieap
+          if [ -n "${{ github.event.inputs.minieap_ref }}" ]; then
+            cd package/minieap
+            git fetch --depth=1 origin "${{ github.event.inputs.minieap_ref }}" && git checkout "${{ github.event.inputs.minieap_ref }}" \
+              || echo "::warning::minieap ref 取不到，回退默认头"
+            cd ..
+          fi
+          test -f package/minieap/Makefile || { echo "::error::minieap 无 Makefile"; exit 1; }
+          # 关键修复：升级源码快照 + 补齐依赖 + 标记 Abandoned（抑制 feeds 警告）
+          sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=0.93/; t; $a PKG_VERSION:=0.93' package/minieap/Makefile
+          sed -i 's|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=https://github.com/updateing/minieap.git|' package/minieap/Makefile
+          sed -i 's/^PKG_SOURCE_VERSION:=.*/PKG_SOURCE_VERSION:=0.93/' package/minieap/Makefile
+          sed -i 's|^PKG_SOURCE_SUBDIR:=.*|PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)|' package/minieap/Makefile
+          if ! grep -q 'PKG_ABANDONED' package/minieap/Makefile; then
+            sed -i '/^include $(INCLUDE_DIR)\/package.mk/i PKG_ABANDONED:=1' package/minieap/Makefile
+          fi
+          if ! grep -q 'DEPENDS:' package/minieap/Makefile; then
+            sed -i '/^define Package\/$(PKG_NAME)$/,/^endef/{
+              /TITLE:=/a\\tDEPENDS:=+libpcap +libnl-tiny +libpthread +@KERNEL_DETECT_NETLINK
+            }' package/minieap/Makefile
+          fi
+          if ! grep -q 'SUBMENU' package/minieap/Makefile; then
+            sed -i 's|^	CATEGORY:=Network$|	CATEGORY:=Network\n	SUBMENU:=Ruijie|' package/minieap/Makefile
+          fi
+          echo "--- minieap/Makefile 关键行 ---"
+          grep -nE 'PKG_(VERSION|SOURCE|ABANDONED)|DEPENDS|SUBMENU|TITLE' package/minieap/Makefile
+
+      # ==================== MiniEAP 图形界面（二选一）====================
+      # luci-proto-minieap：把 MiniEAP 注册为「网络 → 接口 → 协议」里的一个协议选项，
+      #   菜单显示名为 "MiniEAP (802.1x / Ruijie)"，配置存于 /etc/config/network，
+      #   与 netifd 深度集成，推荐在 ImmortalWrt 24.10 使用（需 /usr/lib/lua/luci/model/network/ 存在）。
+      # luci-app-minieap：独立菜单项「服务 → 锐捷认证(MiniEAP)」，自带 UCI 配置与日志页，
+      #   菜单显示名就是"锐捷认证"，界面更直观，但仓库较老、中文服务名场景下有限制。
+      - name: Add MiniEAP LuCI UI
+        run: |
+          cd openwrt
+          rm -rf package/luci-proto-minieap package/luci-app-minieap
+          if [ "${{ github.event.inputs.minieap_ui }}" = "luci-app" ]; then
+            git clone "$MINIEAP_APP_URL" package/luci-app-minieap
+            test -f package/luci-app-minieap/Makefile || { echo "::error::luci-app-minieap 无 Makefile"; exit 1; }
+            # 让菜单显示"锐捷认证"而非英文：优先用自带的 zh-cn 翻译，缺则补
+            if [ -d package/luci-app-minieap/po ]; then
+              for p in package/luci-app-minieap/po/zh-cn/minieap.po package/luci-app-minieap/po/zh_CN/minieap.po; do
+                [ -f "$p" ] || continue
+                grep -q 'msgid "MiniEAP"' "$p" || printf '\nmsgid "MiniEAP"\nmsgstr "锐捷认证"\n' >> "$p"
+              done
+            fi
+            echo "UI 方案：luci-app-minieap（独立菜单「服务 → 锐捷认证」）"
+          else
+            git clone "$MINIEAP_PROTO_URL" package/luci-proto-minieap
+            test -f package/luci-proto-minieap/Makefile || { echo "::error::luci-proto-minieap 无 Makefile"; exit 1; }
+            # 协议名本地化：把 "MiniEAP (802.1x / Ruijie)" 改成"锐捷认证(MiniEAP)"
+            find package/luci-proto-minieap -type f \( -name '*.js' -o -name '*.lua' -o -name '*.po' \) -print0 \
+              | xargs -0 sed -i 's/MiniEAP (802\.1x \/ Ruijie)/锐捷认证(MiniEAP)/g; s/MiniEAP client/锐捷认证(MiniEAP)/g' || true
+            echo "UI 方案：luci-proto-minieap（协议列表里的「锐捷认证(MiniEAP)」）"
+          fi
+
+      - name: Add rkp-ipid
+        run: |
+          cd openwrt
+          rm -rf package/rkp-ipid
+          git clone "$RKP_URL" package/rkp-ipid
+          if [ -n "${{ github.event.inputs.rkp_commit }}" ]; then
+            cd package/rkp-ipid
+            git fetch --depth=1 origin "${{ github.event.inputs.rkp_commit }}" && git checkout "${{ github.event.inputs.rkp_commit }}" \
+              || echo "::warning::rkp commit 取不到，回退默认头"
+            cd ../..
+          fi
+          test -f package/rkp-ipid/Makefile || { echo "::error::rkp-ipid 无Makefile"; exit 1; }
+
+      - name: Add UA3F from source
+        run: |
+          cd openwrt
+          rm -rf package/UA3F
+          git clone "$UA3F_URL" package/UA3F
+          if [ -n "${{ github.event.inputs.ua3f_ref }}" ]; then
+            cd package/UA3F
+            git fetch --depth=1 origin "${{ github.event.inputs.ua3f_ref }}" && git checkout "${{ github.event.inputs.ua3f_ref }}" \
+              || echo "::warning::ua3f ref 取不到，回退默认头"
+            cd ../..
+          fi
+          ls package/UA3F/Makefile || ls package/UA3F/*.go || echo "::warning::UA3F仓库结构未知，自行确认Makefile"
+
+      - name: Add Argon theme
+        run: |
+          cd openwrt
+          rm -rf package/luci-theme-argon package/luci-app-argon-config
+          git clone "$ARGON_URL" package/luci-theme-argon
+          git clone "$ARGONCFG_URL" package/luci-app-argon-config
+
+      - name: Cache ShellCrash offline into files
+        run: |
+          cd openwrt
+          mkdir -p files/root/shellcrash-offline
+          curl -kfsSL "$SHELLCRASH_URL/install.sh" -o files/root/shellcrash-offline/install.sh || echo "::warning::install.sh下载失败"
+          chmod +x files/root/shellcrash-offline/install.sh
+          curl -kfsSL "https://fastly.jsdelivr.net/gh/juewuy/ShellCrash@master.tar.gz" -o files/root/shellcrash-offline/ShellCrash.tar.gz || echo "::warning::tarball下载失败"
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/99-shellcrash-firstboot <<'EOT'
+          #!/bin/sh
+          CRASH_DIR=/root/shellcrash-offline
+          export url='https://fastly.jsdelivr.jsdelivr.net/gh/juewuy/ShellCrash@master'
+          if command -v curl >/dev/null 2>&1; then
+            if curl -kfsSL "$url/install.sh" -o /tmp/sc_install.sh 2>/dev/null; then
+              sh -c "$(curl -kfsSL $url/install.sh)" && source /etc/profile >/dev/null 2>&1
+            elif [ -x "$CRASH_DIR/install.sh" ]; then
+              sh "$CRASH_DIR/install.sh" && source /etc/profile >/dev/null 2>&1
+            fi
+          elif [ -x "$CRASH_DIR/install.sh" ]; then
+            sh "$CRASH_DIR/install.sh" && source /etc/profile >/dev/null 2>&1
+          fi
+          if [ ! -x /usr/bin/crash ] && [ -f "$CRASH_DIR/ShellCrash.tar.gz" ] && [ ! -x "$CRASH_DIR/install.sh" ]; then
+            mkdir -p /tmp/sc_src && tar -xzf "$CRASH_DIR/ShellCrash.tar.gz" -C /tmp/sc_src
+            find /tmp/sc_src -name install.sh -exec sh {} \; && source /etc/profile >/dev/null 2>&1
+          fi
+          exit 0
+          EOT
+          chmod +x files/etc/uci-defaults/99-shellcrash-firstboot
+
+      - name: Preset uci defaults (wifi160/rkp/firewall/minieap)
+        run: |
+          cd openwrt
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/98-ax3000-tweak <<'EOT'
+          #!/bin/sh
+          for r in $(uci show wireless 2>/dev/null | sed -n 's/.*\(radio[0-9]\).*/\1/p' | sort -u); do
+            hwmode=$(uci -q get wireless.$r.hwmode)
+            if [ "$hwmode" = "11a" ] || uci -q get wireless.$r.htmode | grep -q 'HE\|VHT'; then
+              uci -q set wireless.$r.country='CN'
+              uci -q set wireless.$r.htmode='HE160'
+              uci -q set wireless.$r.channel='64'
+              uci -q set wireless.$r.chanbw='20'
+            fi
+          done
+          uci commit wireless
+          mkdir -p /etc/modules.d
+          cat > /etc/modules.d/99-rkp-ipid <<'MOD'
+          rkp-ipid mark_capture=0x10 mark_ramdom=0x20
+          MOD
+          uci -q set firewall.@defaults[0].flow_offloading='0'
+          uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+          uci commit firewall
+          # MiniEAP：生成最小 UCI 框架，首次配置请在 LuCI 页面填写账号密码
+          if [ -x /usr/sbin/minieap ] && ! uci -q get minieap.general >/dev/null 2>&1; then
+            uci -q set minieap.general=general
+            uci -q set minieap.general.enabled='0'
+            uci -q set minieap.general.username=''
+            uci -q set minieap.general.password=''
+            uci -q set minieap.general.nic='wan'
+            uci -q set minieap.general.module='rjv3'
+            uci -q commit minieap
+          fi
+          exit 0
+          EOT
+          chmod +x files/etc/uci-defaults/98-ax3000-tweak
+
+      - name: Assert ipq50xx source
+        run: |
+          cd openwrt
+          test -d target/linux/qualcommax/ipq50xx || { echo "::error::无 qualcommax/ipq50xx"; exit 1; }
+          grep -rli "redmi.ax3000" target/linux/qualcommax/ipq50xx/ || true
+
+      - name: Feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Write .config and defconfig
+        run: |
+          cd openwrt
+          rm -f .config
+          cat > .config <<'EOF'
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq50xx=y
+          CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_redmi_ax3000=y
+          # 开发/加速
+          CONFIG_DEVEL=y
+          CONFIG_CCACHE=y
+          # rkp
+          CONFIG_PACKAGE_kmod-rkp-ipid=y
+          # nft 基础
+          CONFIG_PACKAGE_nftables=y
+          CONFIG_PACKAGE_kmod-nft-core=y
+          CONFIG_PACKAGE_kmod-nft-compat=m
+          # NFQUEUE（nft queue）
+          CONFIG_PACKAGE_kmod-nft-queue=y
+          CONFIG_PACKAGE_kmod-nfnetlink-queue=y
+          CONFIG_PACKAGE_kmod-nfnetlink=y
+          # TPROXY（nft tproxy）
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          CONFIG_PACKAGE_kmod-nf-tproxy=y
+          CONFIG_PACKAGE_kmod-nf-conntrack=y
+          CONFIG_PACKAGE_kmod-nft-socket=m
+          # ua3f：保留iptables nfqueue兼容；若纯nft可改ua3f规则，不删也能共存
+          CONFIG_PACKAGE_ua3f=y
+          CONFIG_PACKAGE_iptables-mod-nfqueue=y
+          CONFIG_PACKAGE_kmod-ipt-nfqueue=y
+          # curl / 工具
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_ca-certificates=y
+          # argon
+          CONFIG_PACKAGE_luci-theme-argon=y
+          CONFIG_PACKAGE_luci-app-argon-config=y
+          # 锐捷认证 MiniEAP（Network → Ruijie）
+          CONFIG_PACKAGE_minieap=y
+          CONFIG_PACKAGE_libpcap=y
+          CONFIG_PACKAGE_libnl-tiny=y
+          # 图形界面（二选一，与 workflow_dispatch 的 minieap_ui 对应）
+          CONFIG_PACKAGE_luci-proto-minieap=y
+          # CONFIG_PACKAGE_luci-app-minieap=y
+          # 基础
+          CONFIG_PACKAGE_iptables-mod-ipopt=y
+          CONFIG_PACKAGE_kmod-ipt-ipopt=y
+          CONFIG_PACKAGE_ipset=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+          EOF
+          make defconfig
+
+      - name: Force ccache settings
+        run: |
+          cd openwrt
+          sed -i 's/^# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/' .config
+          grep -q 'CONFIG_CCACHE=y' .config || echo 'CONFIG_CCACHE=y' >> .config
+          grep -q 'CONFIG_DEVEL=y' .config || echo 'CONFIG_DEVEL=y' >> .config
+
+      - name: Verify target + packages
+        run: |
+          cd openwrt
+          echo "=== TARGET ==="
+          grep -E '^CONFIG_TARGET_' .config
+          grep -qx 'CONFIG_TARGET_qualcommax_ipq50xx=y' .config || { echo "::error::未落ipq50xx"; exit 1; }
+          for p in kmod-rkp-ipid ua3f luci-theme-argon kmod-ipt-nfqueue kmod-nft-queue kmod-nfnetlink-queue \
+                   kmod-nft-tproxy kmod-nf-tproxy curl minieap libpcap libnl-tiny luci-proto-minieap; do
+            grep -qx "CONFIG_PACKAGE_$p=y" .config || grep -qx "CONFIG_PACKAGE_$p=m" .config \
+              || echo "::warning::$p 未选中，检查feeds/内核选项"
+          done
+          if ! grep -qiE 'DEVICE_REDMI_AX3000=y' .config; then
+            echo "::warning::DEVICE名不匹配，列出profile："
+            make --silent dump-target-info 2>/dev/null | grep -i ax3000 || true
+          fi
+
+      - name: Confirm factory ubi image rule exists
+        run: |
+          cd openwrt
+          if ! grep -rq "factory.ubi\|FACTORY_UBI\|ubi" target/linux/qualcommax/image/*.mk; then
+            echo "::warning::ipq50xx image makefile未明显包含factory.ubi规则，最终可能只出sysupgrade"
+          fi
+
+      - name: Download
+        run: cd openwrt && make download -j8
+
+      - name: Build
+        run: |
+          cd openwrt
+          export CCACHE_DIR="$CCACHE_DIR"
+          export CCACHE_MAXSIZE=5G
+          ccache -z || true
+          make -j"$(nproc)" V=s 2>&1 | tee build.log || make -j1 V=s
+          ccache -s || true
+
+      - name: Collect factory ubi only
+        run: |
+          cd openwrt/bin/targets/qualcommax/ipq50xx
+          ls -lh
+          mkdir -p /tmp/ubi
+          cp *factory*.ubi* /tmp/ubi/ || true
+          cp sha256sums /tmp/ubi/ 2>/dev/null || true
+          if [ -z "$(ls -A /tmp/ubi 2>/dev/null | grep -v sha256sums)" ]; then
+            echo "::error::未生成任何factory.ubi，停止上传。若只需sysupgrade请改收集规则"
+            ls -lh
+            exit 1
+          fi
+          echo "--- ubi产物 ---"; ls -l /tmp/ubi
+
+      - name: Collect minieap ipk (for opkg on same build / other devices)
+        run: |
+          cd openwrt
+          mkdir -p /tmp/meapipk
+          for n in minieap libpcap libnl-tiny luci-proto-minieap luci-app-minieap; do
+            find bin -name "${n}_*.ipk" -exec cp {} /tmp/meapipk/ \; 2>/dev/null || true
+          done
+          ls -lh /tmp/meapipk || true
+
+      - name: Collect kmod ipk (same-kernel, for opkg on same build)
+        run: |
+          cd openwrt
+          mkdir -p /tmp/kmodipk
+          for n in kmod-nft-queue kmod-nfnetlink-queue kmod-nft-tproxy kmod-nf-tproxy kmod-nft-core kmod-nf-conntrack kmod-nft-socket kmod-nfnetlink; do
+            find bin -name "${n}_*.ipk" -exec cp {} /tmp/kmodipk/ \; 2>/dev/null || true
+          done
+          ls -lh /tmp/kmodipk || true
+
+      - name: Upload factory ubi
+        uses: actions/upload-artifact@v4
+        with:
+          name: redmi-ax3000-factory-ubi
+          path: /tmp/ubi/*
+
+      - name: Upload minieap ipk
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redmi-ax3000-minieap
+          path: /tmp/meapipk/*
+
+      - name: Upload kmod ipk
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redmi-ax3000-kmod-nft-queue-tproxy
+          path: /tmp/kmodipk/*
